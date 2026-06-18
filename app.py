@@ -12,7 +12,7 @@ import tempfile
 from pypdf import PdfReader, PdfWriter
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
-import pdfrw
+
 
 app = Flask(__name__)
 CORS(app)
@@ -61,16 +61,15 @@ def fill_acroform(pdf_bytes: bytes, fields: dict) -> bytes | None:
         return None
 
 
-# ─── HELPER: Overlay metoda (uvijek radi) ───────────────────────────────────
+# ─── HELPER: Overlay metoda (pypdf — kompatibilna sa svim PDF-ovima) ────────
 def fill_overlay(pdf_bytes: bytes, overlay_data: list) -> bytes:
     """
     overlay_data = lista dict-ova:
       { "page": 0, "x": 100, "y": 700, "text": "Milan Vuksanovic", "size": 10 }
     A4: (0,0) = donje lijevo, (595, 842) = gornje desno
+    Koristi pypdf merge_page umjesto pdfrw — radi sa svim PDF strukturama.
     """
-    overlay_buffer = io.BytesIO()
-    c = canvas.Canvas(overlay_buffer, pagesize=A4)
-
+    # Grupiraj po stranicama
     pages_data: dict[int, list] = {}
     for item in overlay_data:
         pg = item.get("page", 0)
@@ -78,26 +77,30 @@ def fill_overlay(pdf_bytes: bytes, overlay_data: list) -> bytes:
 
     max_page = max(pages_data.keys()) if pages_data else 0
 
+    # Napravi overlay PDF sa reportlab
+    overlay_buffer = io.BytesIO()
+    c = canvas.Canvas(overlay_buffer, pagesize=A4)
     for page_num in range(max_page + 1):
         items = pages_data.get(page_num, [])
         for item in items:
             c.setFont("Helvetica", item.get("size", 10))
             c.drawString(item["x"], item["y"], str(item["text"]))
         c.showPage()
-
     c.save()
     overlay_buffer.seek(0)
 
-    template = pdfrw.PdfReader(io.BytesIO(pdf_bytes))
-    overlay = pdfrw.PdfReader(overlay_buffer)
+    # Spoji sa originalnim PDF-om koristeći pypdf
+    template_reader = PdfReader(io.BytesIO(pdf_bytes))
+    overlay_reader = PdfReader(overlay_buffer)
+    writer = PdfWriter()
 
-    for i, page in enumerate(template.pages):
-        if i < len(overlay.pages):
-            merge = pdfrw.PageMerge(page)
-            merge.add(overlay.pages[i]).render()
+    for i, page in enumerate(template_reader.pages):
+        if i < len(overlay_reader.pages):
+            page.merge_page(overlay_reader.pages[i])
+        writer.add_page(page)
 
     result = io.BytesIO()
-    pdfrw.PdfWriter().write(result, template)
+    writer.write(result)
     result.seek(0)
     return result.read()
 
