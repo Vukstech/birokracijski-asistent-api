@@ -347,21 +347,21 @@ def fill_kindergeld_komplet():
 
     files = {}
 
-    # KG1 glavni zahtjev
+    # KiZ1 glavni zahtjev
     try:
-        pdf_bytes = get_pdf("KG1")
-        overlay = get_kg1_overlay(user)
-        files["KG1_Hauptantrag.pdf"] = fill_overlay(pdf_bytes, overlay)
+        pdf_bytes = get_pdf("KiZ1")
+        overlay = get_kiz1_overlay(user)
+        files["KiZ1_Hauptantrag.pdf"] = fill_overlay(pdf_bytes, overlay)
     except Exception as e:
-        return jsonify({"error": f"KG1 greška: {str(e)}"}), 500
+        return jsonify({"error": f"KiZ1 greška: {str(e)}"}), 500
 
     # Anlage Kind za svako dijete
     for kind in djeca:
         try:
-            pdf_bytes = get_pdf("KG1_KIND")
+            pdf_bytes = get_pdf("KiZ1_AnK")
             overlay = get_kg1_kind_overlay(user, kind)
             vorname = kind.get("vorname", "Kind")
-            files[f"KG1_AnlageKind_{vorname}.pdf"] = fill_overlay(pdf_bytes, overlay)
+            files[f"KiZ1_AnlageKind_{vorname}.pdf"] = fill_overlay(pdf_bytes, overlay)
         except Exception as e:
             return jsonify({"error": f"Anlage Kind greška za {kind}: {str(e)}"}), 500
 
