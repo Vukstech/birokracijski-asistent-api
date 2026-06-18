@@ -17,44 +17,24 @@ import pdfrw
 app = Flask(__name__)
 CORS(app)  # Dozvoli web frontend pozive
 
-# ─── PDF URLS (originali s arbeitsagentur.de) ───────────────────────────────
-PDF_URLS = {
-    "KG1":         "https://www.arbeitsagentur.de/datei/kg1-antrag-kindergeld_ba017202.pdf",
-    "KG1_KIND":    "https://www.arbeitsagentur.de/datei/kg1-anlagekind_ba013117.pdf",
-    "KiZ1":        "https://www.arbeitsagentur.de/datei/kiz1-antrag_ba036540.pdf",
-    "KiZ1_AnA":    "https://www.arbeitsagentur.de/datei/kiz1-ana_ba034980.pdf",
-    "KiZ1_AnK":    "https://www.arbeitsagentur.de/datei/kiz1-ank_ba035005.pdf",
+# ─── PDF fajlovi lokalno u repou ─────────────────────────────────────────────
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+PDF_LOCAL = {
+    "KiZ1":     os.path.join(BASE_DIR, "zahtijev za kinder geld.pdf"),
+    "KiZ1_AnK": os.path.join(BASE_DIR, "zahtijevza djecu.pdf"),
+    "KiZ1_AnA": os.path.join(BASE_DIR, "za partnera.pdf"),
 }
 
-FORMS_DIR = os.path.join(os.path.dirname(__file__), "forms")
-os.makedirs(FORMS_DIR, exist_ok=True)
-
-
-# ─── HELPER: Skini PDF i keširaj lokalno ────────────────────────────────────
+# ─── HELPER: Čitaj PDF lokalno ───────────────────────────────────────────────
 def get_pdf(form_key: str) -> bytes:
-    local_path = os.path.join(FORMS_DIR, f"{form_key}.pdf")
-    if os.path.exists(local_path):
-        with open(local_path, "rb") as f:
-            return f.read()
-    url = PDF_URLS.get(form_key)
-    if not url:
+    local_path = PDF_LOCAL.get(form_key)
+    if not local_path:
         raise ValueError(f"Nepoznat form_key: {form_key}")
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "application/pdf,application/octet-stream,*/*",
-        "Accept-Language": "de-DE,de;q=0.9,en;q=0.8",
-        "Accept-Encoding": "identity",
-        "Referer": "https://www.arbeitsagentur.de/",
-    }
-    resp = requests.get(url, headers=headers, timeout=30, stream=True)
-    resp.raise_for_status()
-    content = resp.content
-    # Provjeri da je pravi PDF
-    if not content.startswith(b'%PDF'):
-        raise ValueError(f"Nije validan PDF za {form_key}. Dobiveno: {content[:100]}")
-    with open(local_path, "wb") as f:
-        f.write(content)
-    return content
+    if not os.path.exists(local_path):
+        raise FileNotFoundError(f"PDF nije pronadjen: {local_path}")
+    with open(local_path, "rb") as f:
+        return f.read()
 
 
 # ─── HELPER: Pokušaj popuniti AcroForm polja ────────────────────────────────
