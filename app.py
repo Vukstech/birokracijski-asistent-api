@@ -7,7 +7,7 @@ from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 import os
 import io
-import requests
+import zipfile
 import tempfile
 from pypdf import PdfReader, PdfWriter
 from reportlab.pdfgen import canvas
@@ -15,16 +15,21 @@ from reportlab.lib.pagesizes import A4
 import pdfrw
 
 app = Flask(__name__)
-CORS(app)  # Dozvoli web frontend pozive
+CORS(app)
 
 # ─── PDF fajlovi lokalno u repou ─────────────────────────────────────────────
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 PDF_LOCAL = {
+    # Kinderzuschlag (KiZ) — obnavlja se svakih 6 mjeseci
     "KiZ1":     os.path.join(BASE_DIR, "zahtijev za kinder geld.pdf"),
     "KiZ1_AnK": os.path.join(BASE_DIR, "zahtijevza djecu.pdf"),
     "KiZ1_AnA": os.path.join(BASE_DIR, "za partnera.pdf"),
+    # Kindergeld (KG1) — podnosi se jednom
+    "KG1":      os.path.join(BASE_DIR, "kg1-antrag-kindergeld.pdf"),
+    "KG1_AnK":  os.path.join(BASE_DIR, "kg1-anlagekind kinders.pdf"),
 }
+
 
 # ─── HELPER: Čitaj PDF lokalno ───────────────────────────────────────────────
 def get_pdf(form_key: str) -> bytes:
@@ -39,10 +44,6 @@ def get_pdf(form_key: str) -> bytes:
 
 # ─── HELPER: Pokušaj popuniti AcroForm polja ────────────────────────────────
 def fill_acroform(pdf_bytes: bytes, fields: dict) -> bytes | None:
-    """
-    Pokušava popuniti AcroForm polja.
-    Vraća None ako PDF nema polja ili su zaštićena.
-    """
     try:
         reader = PdfReader(io.BytesIO(pdf_bytes))
         if "/AcroForm" not in reader.trailer["/Root"]:
@@ -65,13 +66,11 @@ def fill_overlay(pdf_bytes: bytes, overlay_data: list) -> bytes:
     """
     overlay_data = lista dict-ova:
       { "page": 0, "x": 100, "y": 700, "text": "Milan Vuksanovic", "size": 10 }
-    Nalijepljuje tekst na točne koordinate originalnog PDF-a.
+    A4: (0,0) = donje lijevo, (595, 842) = gornje desno
     """
-    # Napravi overlay PDF
     overlay_buffer = io.BytesIO()
     c = canvas.Canvas(overlay_buffer, pagesize=A4)
 
-    # Grupiraj po stranicama
     pages_data: dict[int, list] = {}
     for item in overlay_data:
         pg = item.get("page", 0)
@@ -81,7 +80,6 @@ def fill_overlay(pdf_bytes: bytes, overlay_data: list) -> bytes:
 
     for page_num in range(max_page + 1):
         items = pages_data.get(page_num, [])
-        c.setFont("Helvetica", 10)
         for item in items:
             c.setFont("Helvetica", item.get("size", 10))
             c.drawString(item["x"], item["y"], str(item["text"]))
@@ -90,7 +88,6 @@ def fill_overlay(pdf_bytes: bytes, overlay_data: list) -> bytes:
     c.save()
     overlay_buffer.seek(0)
 
-    # Spoji s originalnim
     template = pdfrw.PdfReader(io.BytesIO(pdf_bytes))
     overlay = pdfrw.PdfReader(overlay_buffer)
 
@@ -105,14 +102,11 @@ def fill_overlay(pdf_bytes: bytes, overlay_data: list) -> bytes:
     return result.read()
 
 
-# ─── KOORDINATE za KG1 (Milan's podaci) ─────────────────────────────────────
+# ─── KOORDINATE OVERLAY ──────────────────────────────────────────────────────
+
 def get_kg1_overlay(user: dict) -> list:
-    """
-    Koordinate za KG1 formular — izmjerene na originalnom PDF-u.
-    A4: (0,0) = donje lijevo, (595, 842) = gornje desno
-    """
+    """Koordinate za KG1 glavni formular (Familienkasse)"""
     return [
-        # Stranica 1 — Antragsteller (podnositelj zahtjeva)
         {"page": 0, "x": 115, "y": 740, "text": user.get("familienname", ""), "size": 9},
         {"page": 0, "x": 370, "y": 740, "text": user.get("vorname", ""), "size": 9},
         {"page": 0, "x": 115, "y": 720, "text": user.get("strasse", ""), "size": 9},
@@ -123,12 +117,24 @@ def get_kg1_overlay(user: dict) -> list:
         {"page": 0, "x": 370, "y": 680, "text": user.get("steuer_id", ""), "size": 9},
         {"page": 0, "x": 115, "y": 640, "text": user.get("telefon", ""), "size": 9},
         {"page": 0, "x": 370, "y": 640, "text": user.get("email", ""), "size": 9},
-        # IBAN
         {"page": 0, "x": 115, "y": 580, "text": user.get("iban", ""), "size": 9},
     ]
 
 
+def get_kg1_ank_overlay(user: dict, kind: dict) -> list:
+    """Koordinate za KG1 Anlage Kind"""
+    return [
+        {"page": 0, "x": 115, "y": 740, "text": user.get("familienname", ""), "size": 9},
+        {"page": 0, "x": 370, "y": 740, "text": user.get("vorname", ""), "size": 9},
+        {"page": 0, "x": 115, "y": 680, "text": kind.get("familienname", ""), "size": 9},
+        {"page": 0, "x": 370, "y": 680, "text": kind.get("vorname", ""), "size": 9},
+        {"page": 0, "x": 115, "y": 660, "text": kind.get("geburtsdatum", ""), "size": 9},
+        {"page": 0, "x": 370, "y": 660, "text": kind.get("steuer_id", ""), "size": 9},
+    ]
+
+
 def get_kiz1_overlay(user: dict) -> list:
+    """Koordinate za KiZ1 glavni formular (Jobcenter/Familienkasse)"""
     return [
         {"page": 0, "x": 115, "y": 740, "text": user.get("familienname", ""), "size": 9},
         {"page": 0, "x": 370, "y": 740, "text": user.get("vorname", ""), "size": 9},
@@ -142,12 +148,11 @@ def get_kiz1_overlay(user: dict) -> list:
     ]
 
 
-def get_kg1_kind_overlay(user: dict, kind: dict) -> list:
+def get_kiz1_ank_overlay(user: dict, kind: dict) -> list:
+    """Koordinate za KiZ1 Anlage Kind"""
     return [
-        # Roditelj (gore)
         {"page": 0, "x": 115, "y": 740, "text": user.get("familienname", ""), "size": 9},
         {"page": 0, "x": 370, "y": 740, "text": user.get("vorname", ""), "size": 9},
-        # Dijete
         {"page": 0, "x": 115, "y": 680, "text": kind.get("familienname", ""), "size": 9},
         {"page": 0, "x": 370, "y": 680, "text": kind.get("vorname", ""), "size": 9},
         {"page": 0, "x": 115, "y": 660, "text": kind.get("geburtsdatum", ""), "size": 9},
@@ -163,12 +168,13 @@ def index():
         "status": "ok",
         "service": "Milanov Birokracijski Asistent — PDF API",
         "endpoints": {
-            "POST /fill/kg1": "Popuni KG1 Kindergeld zahtjev",
-            "POST /fill/kg1-kind": "Popuni KG1 Anlage Kind (jedno dijete)",
-            "POST /fill/kiz1": "Popuni KiZ1 Kinderzuschlag zahtjev",
-            "POST /fill/kiz1-ana": "Popuni KiZ1 Anlage Antragsteller",
-            "POST /fill/kiz1-ank": "Popuni KiZ1 Anlage Kind",
-            "POST /fill/kindergeld-komplet": "Popuni KG1 + Anlage Kind × N djece (ZIP)",
+            "POST /fill/kg1":                   "KG1 Kindergeld zahtjev (podnosi se JEDNOM)",
+            "POST /fill/kg1-kind":              "KG1 Anlage Kind (jedno dijete)",
+            "POST /fill/kiz1":                  "KiZ1 Kinderzuschlag zahtjev (svakih 6 mj)",
+            "POST /fill/kiz1-ana":              "KiZ1 Anlage Antragsteller",
+            "POST /fill/kiz1-ank":              "KiZ1 Anlage Kind (jedno dijete)",
+            "POST /fill/kindergeld-komplet":    "KG1 + KiZ1 + sva Anlage Kind u ZIP (onboarding)",
+            "POST /fill/kinderzuschlag-obnova": "KiZ1 + Anlage Kind × djeca u ZIP (obnova svakih 6mj)",
         }
     })
 
@@ -178,21 +184,18 @@ def health():
     return jsonify({"status": "ok"})
 
 
+# ── KG1 endpoints ─────────────────────────────────────────────────────────────
+
 @app.route("/fill/kg1", methods=["POST"])
 def fill_kg1():
     """
     POST body (JSON):
     {
-      "familienname": "Vuksanovic",
-      "vorname": "Milan",
-      "strasse": "Markobeler str",
-      "hausnummer": "41",
-      "plz": "63452",
-      "ort": "Hanau",
-      "geburtsdatum": "13.03.1984",
-      "steuer_id": "27415068375",
-      "telefon": "0176 21956978",
-      "email": "milanvuksanovic0@gmail.com",
+      "familienname": "Vuksanovic", "vorname": "Milan",
+      "strasse": "Markobeler str", "hausnummer": "41",
+      "plz": "63452", "ort": "Hanau",
+      "geburtsdatum": "13.03.1984", "steuer_id": "27415068375",
+      "telefon": "0176 21956978", "email": "milanvuksanovic0@gmail.com",
       "iban": "BE62974005892761"
     }
     """
@@ -203,9 +206,8 @@ def fill_kg1():
     try:
         pdf_bytes = get_pdf("KG1")
     except Exception as e:
-        return jsonify({"error": f"Ne mogu skinuti KG1 PDF: {str(e)}"}), 500
+        return jsonify({"error": f"Ne mogu otvoriti KG1 PDF: {str(e)}"}), 500
 
-    # Pokušaj AcroForm prvo
     result = fill_acroform(pdf_bytes, {
         "Familienname": data.get("familienname", ""),
         "Vorname": data.get("vorname", ""),
@@ -220,10 +222,8 @@ def fill_kg1():
         "IBAN": data.get("iban", ""),
     })
 
-    # Fallback na overlay
     if result is None:
-        overlay = get_kg1_overlay(data)
-        result = fill_overlay(pdf_bytes, overlay)
+        result = fill_overlay(pdf_bytes, get_kg1_overlay(data))
 
     return send_file(
         io.BytesIO(result),
@@ -238,7 +238,7 @@ def fill_kg1_kind():
     """
     POST body:
     {
-      "user": { "familienname": "Vuksanovic", "vorname": "Milan", ... },
+      "user": { "familienname": "Vuksanovic", "vorname": "Milan" },
       "kind": { "familienname": "Vuksanovic", "vorname": "Mia",
                 "geburtsdatum": "01.01.2015", "steuer_id": "..." }
     }
@@ -248,21 +248,21 @@ def fill_kg1_kind():
     kind = data.get("kind", {})
 
     try:
-        pdf_bytes = get_pdf("KG1_KIND")
+        pdf_bytes = get_pdf("KG1_AnK")
     except Exception as e:
-        return jsonify({"error": f"Ne mogu skinuti PDF: {str(e)}"}), 500
+        return jsonify({"error": f"Ne mogu otvoriti KG1_AnK PDF: {str(e)}"}), 500
 
-    overlay = get_kg1_kind_overlay(user, kind)
-    result = fill_overlay(pdf_bytes, overlay)
+    result = fill_overlay(pdf_bytes, get_kg1_ank_overlay(user, kind))
 
-    vorname = kind.get("vorname", "Kind")
     return send_file(
         io.BytesIO(result),
         mimetype="application/pdf",
         as_attachment=True,
-        download_name=f"KG1_AnlageKind_{vorname}.pdf"
+        download_name=f"KG1_AnlageKind_{kind.get('vorname', 'Kind')}.pdf"
     )
 
+
+# ── KiZ1 endpoints ────────────────────────────────────────────────────────────
 
 @app.route("/fill/kiz1", methods=["POST"])
 def fill_kiz1():
@@ -272,9 +272,7 @@ def fill_kiz1():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-    overlay = get_kiz1_overlay(data)
-    result = fill_overlay(pdf_bytes, overlay)
-
+    result = fill_overlay(pdf_bytes, get_kiz1_overlay(data))
     return send_file(
         io.BytesIO(result),
         mimetype="application/pdf",
@@ -291,9 +289,7 @@ def fill_kiz1_ana():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-    overlay = get_kiz1_overlay(data)
-    result = fill_overlay(pdf_bytes, overlay)
-
+    result = fill_overlay(pdf_bytes, get_kiz1_overlay(data))
     return send_file(
         io.BytesIO(result),
         mimetype="application/pdf",
@@ -313,57 +309,102 @@ def fill_kiz1_ank():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-    overlay = get_kg1_kind_overlay(user, kind)
-    result = fill_overlay(pdf_bytes, overlay)
-
-    vorname = kind.get("vorname", "Kind")
+    result = fill_overlay(pdf_bytes, get_kiz1_ank_overlay(user, kind))
     return send_file(
         io.BytesIO(result),
         mimetype="application/pdf",
         as_attachment=True,
-        download_name=f"KiZ1_AnK_{vorname}.pdf"
+        download_name=f"KiZ1_AnK_{kind.get('vorname', 'Kind')}.pdf"
     )
 
+
+# ── Komplet paketi ─────────────────────────────────────────────────────────────
 
 @app.route("/fill/kindergeld-komplet", methods=["POST"])
 def fill_kindergeld_komplet():
     """
-    Popuni KG1 + Anlage Kind za svu djecu i vrati ZIP.
+    ONBOARDING paket — podnosi se JEDNOM.
+    Vraća ZIP sa:
+      - KG1_Hauptantrag.pdf
+      - KG1_AnlageKind_[ime].pdf × djeca
+      - KiZ1_Hauptantrag.pdf
+      - KiZ1_AnlageKind_[ime].pdf × djeca
+
     POST body:
     {
-      "user": { ...podaci roditelja... },
+      "user": {
+        "familienname": "Vuksanovic", "vorname": "Milan",
+        "strasse": "Markobeler str", "hausnummer": "41",
+        "plz": "63452", "ort": "Hanau",
+        "geburtsdatum": "13.03.1984", "steuer_id": "27415068375",
+        "telefon": "0176 21956978", "email": "milanvuksanovic0@gmail.com",
+        "iban": "BE62974005892761"
+      },
       "djeca": [
-        { "familienname": "Vuksanovic", "vorname": "Mia", "geburtsdatum": "...", "steuer_id": "..." },
-        { "familienname": "Vuksanovic", "vorname": "Dunja", ... },
-        { "familienname": "Vuksanovic", "vorname": "Rio", ... }
+        { "familienname": "Vuksanovic", "vorname": "Mia",
+          "geburtsdatum": "01.01.2015", "steuer_id": "" },
+        { "familienname": "Vuksanovic", "vorname": "Dunja",
+          "geburtsdatum": "01.01.2018", "steuer_id": "" },
+        { "familienname": "Vuksanovic", "vorname": "Rio",
+          "geburtsdatum": "01.01.2021", "steuer_id": "" }
       ]
     }
     """
-    import zipfile
-
     data = request.get_json(force=True)
     user = data.get("user", {})
     djeca = data.get("djeca", [])
 
     files = {}
 
-    # KiZ1 glavni zahtjev
+    # 1. KG1 glavni zahtjev
+    try:
+        pdf_bytes = get_pdf("KG1")
+        result = fill_acroform(pdf_bytes, {
+            "Familienname": user.get("familienname", ""),
+            "Vorname": user.get("vorname", ""),
+            "Strasse": user.get("strasse", ""),
+            "Hausnummer": user.get("hausnummer", ""),
+            "PLZ": user.get("plz", ""),
+            "Ort": user.get("ort", ""),
+            "Geburtsdatum": user.get("geburtsdatum", ""),
+            "SteuerID": user.get("steuer_id", ""),
+            "Telefon": user.get("telefon", ""),
+            "Email": user.get("email", ""),
+            "IBAN": user.get("iban", ""),
+        })
+        if result is None:
+            result = fill_overlay(pdf_bytes, get_kg1_overlay(user))
+        files["KG1_Hauptantrag.pdf"] = result
+    except Exception as e:
+        return jsonify({"error": f"KG1 greška: {str(e)}"}), 500
+
+    # 2. KG1 Anlage Kind za svako dijete
+    for kind in djeca:
+        try:
+            pdf_bytes = get_pdf("KG1_AnK")
+            result = fill_overlay(pdf_bytes, get_kg1_ank_overlay(user, kind))
+            vorname = kind.get("vorname", "Kind")
+            files[f"KG1_AnlageKind_{vorname}.pdf"] = result
+        except Exception as e:
+            return jsonify({"error": f"KG1 Anlage Kind greška ({kind.get('vorname', '?')}): {str(e)}"}), 500
+
+    # 3. KiZ1 glavni zahtjev
     try:
         pdf_bytes = get_pdf("KiZ1")
-        overlay = get_kiz1_overlay(user)
-        files["KiZ1_Hauptantrag.pdf"] = fill_overlay(pdf_bytes, overlay)
+        result = fill_overlay(pdf_bytes, get_kiz1_overlay(user))
+        files["KiZ1_Hauptantrag.pdf"] = result
     except Exception as e:
         return jsonify({"error": f"KiZ1 greška: {str(e)}"}), 500
 
-    # Anlage Kind za svako dijete
+    # 4. KiZ1 Anlage Kind za svako dijete
     for kind in djeca:
         try:
             pdf_bytes = get_pdf("KiZ1_AnK")
-            overlay = get_kg1_kind_overlay(user, kind)
+            result = fill_overlay(pdf_bytes, get_kiz1_ank_overlay(user, kind))
             vorname = kind.get("vorname", "Kind")
-            files[f"KiZ1_AnlageKind_{vorname}.pdf"] = fill_overlay(pdf_bytes, overlay)
+            files[f"KiZ1_AnlageKind_{vorname}.pdf"] = result
         except Exception as e:
-            return jsonify({"error": f"Anlage Kind greška za {kind}: {str(e)}"}), 500
+            return jsonify({"error": f"KiZ1 Anlage Kind greška ({kind.get('vorname', '?')}): {str(e)}"}), 500
 
     # Napravi ZIP
     zip_buffer = io.BytesIO()
@@ -376,7 +417,55 @@ def fill_kindergeld_komplet():
         zip_buffer,
         mimetype="application/zip",
         as_attachment=True,
-        download_name="Kindergeld_Komplet.zip"
+        download_name="Kindergeld_Komplet_Onboarding.zip"
+    )
+
+
+@app.route("/fill/kinderzuschlag-obnova", methods=["POST"])
+def fill_kinderzuschlag_obnova():
+    """
+    OBNOVA svakih 6 mjeseci — samo KiZ1 fajlovi.
+    Vraća ZIP sa:
+      - KiZ1_Hauptantrag.pdf
+      - KiZ1_AnlageKind_[ime].pdf × djeca
+
+    POST body: isti format kao kindergeld-komplet
+    """
+    data = request.get_json(force=True)
+    user = data.get("user", {})
+    djeca = data.get("djeca", [])
+
+    files = {}
+
+    # KiZ1 glavni zahtjev
+    try:
+        pdf_bytes = get_pdf("KiZ1")
+        result = fill_overlay(pdf_bytes, get_kiz1_overlay(user))
+        files["KiZ1_Hauptantrag.pdf"] = result
+    except Exception as e:
+        return jsonify({"error": f"KiZ1 greška: {str(e)}"}), 500
+
+    # KiZ1 Anlage Kind za svako dijete
+    for kind in djeca:
+        try:
+            pdf_bytes = get_pdf("KiZ1_AnK")
+            result = fill_overlay(pdf_bytes, get_kiz1_ank_overlay(user, kind))
+            vorname = kind.get("vorname", "Kind")
+            files[f"KiZ1_AnlageKind_{vorname}.pdf"] = result
+        except Exception as e:
+            return jsonify({"error": f"KiZ1 Anlage Kind greška ({kind.get('vorname', '?')}): {str(e)}"}), 500
+
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for filename, content in files.items():
+            zf.writestr(filename, content)
+
+    zip_buffer.seek(0)
+    return send_file(
+        zip_buffer,
+        mimetype="application/zip",
+        as_attachment=True,
+        download_name="KiZ1_Obnova.zip"
     )
 
 
