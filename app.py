@@ -39,11 +39,22 @@ def get_pdf(form_key: str) -> bytes:
     url = PDF_URLS.get(form_key)
     if not url:
         raise ValueError(f"Nepoznat form_key: {form_key}")
-    resp = requests.get(url, timeout=15)
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/pdf,application/octet-stream,*/*",
+        "Accept-Language": "de-DE,de;q=0.9,en;q=0.8",
+        "Accept-Encoding": "identity",
+        "Referer": "https://www.arbeitsagentur.de/",
+    }
+    resp = requests.get(url, headers=headers, timeout=30, stream=True)
     resp.raise_for_status()
+    content = resp.content
+    # Provjeri da je pravi PDF
+    if not content.startswith(b'%PDF'):
+        raise ValueError(f"Nije validan PDF za {form_key}. Dobiveno: {content[:100]}")
     with open(local_path, "wb") as f:
-        f.write(resp.content)
-    return resp.content
+        f.write(content)
+    return content
 
 
 # ─── HELPER: Pokušaj popuniti AcroForm polja ────────────────────────────────
